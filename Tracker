@@ -1,0 +1,1123 @@
+import React, {
+    useState,
+    useMemo,
+    useCallback,
+    useEffect,
+    startTransition,
+    type CSSProperties,
+    useRef,
+} from "react"
+import {
+    addPropertyControls,
+    ControlType,
+    RenderTarget,
+    useIsStaticRenderer,
+} from "framer"
+
+type TabType = "films" | "series" | "anime" | "games" | "books"
+
+interface MediaItem {
+    id: string
+    title: string
+    image: string
+    year?: string
+    rating?: number
+    type: TabType
+    hoursSpent?: number
+    dateAdded?: string
+}
+
+interface MediaTrackerProps {
+    title: string
+    subtitle: string
+    searchPlaceholder: string
+    backgroundColor: string
+    cardColor: string
+    textColor: string
+    mutedTextColor: string
+    accentColor: string
+    tableBorderColor: string
+    themeDarkIcon?: { src: string }
+    themeLightIcon?: { src: string }
+    searchIcon?: { src: string }
+    logo?: { src: string }
+    style?: CSSProperties
+}
+
+/**
+ * Media Tracker Dashboard
+ *
+ * @framerIntrinsicWidth 960
+ * @framerIntrinsicHeight 540
+ *
+ * @framerSupportedLayoutWidth any-prefer-fixed
+ * @framerSupportedLayoutHeight any-prefer-fixed
+ */
+export default function MediaTracker(props: MediaTrackerProps) {
+    const isStatic = useIsStaticRenderer()
+
+    const {
+        title,
+        subtitle,
+        searchPlaceholder,
+        backgroundColor,
+        cardColor,
+        textColor,
+        mutedTextColor,
+        accentColor,
+        tableBorderColor,
+        themeDarkIcon,
+        themeLightIcon,
+        searchIcon,
+        style,
+        logo,
+    } = props
+
+    const [activeTab, setActiveTab] = useState<TabType>("films")
+    const [query, setQuery] = useState("")
+    const [searchResults, setSearchResults] = useState<MediaItem[]>([])
+    const [isSearching, setIsSearching] = useState(false)
+    const [searchError, setSearchError] = useState<string | null>(null)
+    const [hasSearched, setHasSearched] = useState(false)
+    const [trackedItems, setTrackedItems] = useState<
+        Record<TabType, MediaItem[]>
+    >(() => {
+        const defaultState: Record<TabType, MediaItem[]> = {
+            films: [],
+            series: [],
+            anime: [],
+            games: [],
+            books: [],
+        }
+
+        if (typeof window !== "undefined" && window.localStorage) {
+            try {
+                const stored = window.localStorage.getItem("mediaTracker_items")
+                if (stored) {
+                    const parsed = JSON.parse(stored)
+                    // Merge with defaultState to ensure all tabs exist (especially new "books" tab)
+                    return {
+                        ...defaultState,
+                        ...parsed,
+                    }
+                }
+            } catch (error) {
+                console.warn(
+                    "[MediaTracker] Failed to load from localStorage",
+                    error
+                )
+            }
+        }
+
+        return defaultState
+    })
+
+    const [isDarkMode, setIsDarkMode] = useState(() => {
+        if (typeof window !== "undefined" && window.localStorage) {
+            try {
+                const stored = window.localStorage.getItem(
+                    "mediaTracker_darkMode"
+                )
+                if (stored !== null) {
+                    return JSON.parse(stored)
+                }
+            } catch (error) {
+                console.warn(
+                    "[MediaTracker] Failed to load dark mode from localStorage",
+                    error
+                )
+            }
+        }
+        return true
+    })
+
+    const [igdbToken, setIgdbToken] = useState<string | null>(null)
+
+    // Color palettes
+    const darkPalette = {
+        backgroundColor: "#141414",
+        cardColor: "#1A1A1A",
+        textColor: "#FFFFFF",
+        mutedTextColor: "#888888",
+        accentColor: "#FFFFFF",
+        tableBorderColor: "#2A2A2A",
+    }
+
+    const lightPalette = {
+        backgroundColor: "#FFFBF3",
+        cardColor: "#FFFFFF",
+        textColor: "#0A0A0A",
+        mutedTextColor: "#6B6B6B",
+        accentColor: "#0A0A0A",
+        tableBorderColor: "#E5E5E5",
+    }
+
+    const colors = isDarkMode ? darkPalette : lightPalette
+
+    // Save tracked items to localStorage
+    useEffect(() => {
+        if (typeof window !== "undefined" && window.localStorage) {
+            try {
+                window.localStorage.setItem(
+                    "mediaTracker_items",
+                    JSON.stringify(trackedItems)
+                )
+            } catch (error) {
+                console.warn(
+                    "[MediaTracker] Failed to save to localStorage",
+                    error
+                )
+            }
+        }
+    }, [trackedItems])
+
+    // Save dark mode preference
+    useEffect(() => {
+        if (typeof window !== "undefined" && window.localStorage) {
+            try {
+                window.localStorage.setItem(
+                    "mediaTracker_darkMode",
+                    JSON.stringify(isDarkMode)
+                )
+            } catch (error) {
+                console.warn("[MediaTracker] Failed to save dark mode", error)
+            }
+        }
+    }, [isDarkMode])
+
+    // Update body background
+    useEffect(() => {
+        if (typeof document !== "undefined") {
+            document.body.style.backgroundColor = colors.backgroundColor
+        }
+    }, [colors.backgroundColor])
+
+    // Get IGDB access token
+    useEffect(() => {
+        if (typeof window === "undefined") return
+
+        const getIGDBToken = async () => {
+            try {
+                const response = await fetch(
+                    `https://id.twitch.tv/oauth2/token?client_id=o3wf6j9k4ei5oijxd6ye2qwj4w9qvb&client_secret=zru4gj9kefbddqi287ef1onqcv0zey&grant_type=client_credentials`,
+                    { method: "POST" }
+                )
+                const data = await response.json()
+                if (data.access_token) {
+                    setIgdbToken(data.access_token)
+                }
+            } catch (error) {
+                console.error("[MediaTracker] Failed to get IGDB token", error)
+            }
+        }
+
+        getIGDBToken()
+    }, [])
+
+    // Search function
+    const handleSearch = useCallback(async () => {
+        if (!query.trim()) return
+
+        startTransition(() => {
+            setIsSearching(true)
+            setSearchResults([])
+        })
+
+        // Helper function for multi-language TMDB search
+        const searchTMDB = async (
+            endpoint: string,
+            query: string
+        ): Promise<any[]> => {
+            const esResponse = await fetch(
+                `https://api.themoviedb.org/3/${endpoint}?api_key=8265bd1679663a7ea12ac168da84d2e8&query=${encodeURIComponent(query)}&language=es-ES`
+            )
+            const esData = await esResponse.json()
+
+            const enResponse = await fetch(
+                `https://api.themoviedb.org/3/${endpoint}?api_key=8265bd1679663a7ea12ac168da84d2e8&query=${encodeURIComponent(query)}&language=en-US`
+            )
+            const enData = await enResponse.json()
+
+            // Merge and deduplicate by id
+            const combined = [...(esData.results || [])]
+            for (const item of enData.results || []) {
+                if (!combined.find((e: any) => e.id === item.id)) {
+                    combined.push(item)
+                }
+            }
+
+            return combined.slice(0, 10)
+        }
+
+        try {
+            let results: MediaItem[] = []
+
+            if (activeTab === "films") {
+                // TMDB Movies API with multi-language fallback
+                const combinedResults = await searchTMDB("search/movie", query)
+                console.log(
+                    "[MediaTracker] TMDB Films combined results:",
+                    combinedResults
+                )
+
+                results = combinedResults.map((item: any) => ({
+                    id: `film-${item.id}`,
+                    title: item.title || "Unknown Title",
+                    image: item.poster_path
+                        ? `https://image.tmdb.org/t/p/w500${item.poster_path}`
+                        : "https://via.placeholder.com/200x300?text=No+Image",
+                    year: item.release_date?.split("-")[0] || "",
+                    rating: item.vote_average
+                        ? Math.round(item.vote_average * 10) / 10
+                        : undefined,
+                    type: "films" as TabType,
+                }))
+            } else if (activeTab === "series") {
+                // TMDB TV Series API with multi-language fallback
+                const combinedResults = await searchTMDB("search/tv", query)
+                console.log(
+                    "[MediaTracker] TMDB Series combined results:",
+                    combinedResults
+                )
+
+                results = combinedResults.map((item: any) => ({
+                    id: `series-${item.id}`,
+                    title: item.name || "Unknown Title",
+                    image: item.poster_path
+                        ? `https://image.tmdb.org/t/p/w500${item.poster_path}`
+                        : "https://via.placeholder.com/200x300?text=No+Image",
+                    year: item.first_air_date?.split("-")[0] || "",
+                    rating: item.vote_average
+                        ? Math.round(item.vote_average * 10) / 10
+                        : undefined,
+                    type: "series" as TabType,
+                }))
+            } else if (activeTab === "anime") {
+                // Jikan API (MyAnimeList) - No API key needed
+                const response = await fetch(
+                    `https://api.jikan.moe/v4/anime?q=${encodeURIComponent(query)}&limit=10`
+                )
+                const data = await response.json()
+                console.log("[MediaTracker] Jikan Anime response:", data)
+
+                if (data.data && Array.isArray(data.data)) {
+                    results = data.data.map((item: any) => ({
+                        id: `anime-${item.mal_id}`,
+                        title: item.title || "Unknown Title",
+                        image:
+                            item.images?.jpg?.image_url ||
+                            "https://via.placeholder.com/200x300?text=No+Image",
+                        year:
+                            item.year?.toString() ||
+                            item.aired?.from?.split("-")[0] ||
+                            "",
+                        rating: item.score
+                            ? Math.round(item.score * 10) / 10
+                            : undefined,
+                        type: "anime" as TabType,
+                    }))
+                }
+            } else if (activeTab === "games") {
+                // IGDB API
+                if (!igdbToken) {
+                    console.warn("[MediaTracker] IGDB token not available yet")
+                    startTransition(() => {
+                        setIsSearching(false)
+                    })
+                    return
+                }
+
+                const response = await fetch("https://api.igdb.com/v4/games", {
+                    method: "POST",
+                    headers: {
+                        "Client-ID": "o3wf6j9k4ei5oijxd6ye2qwj4w9qvb",
+                        Authorization: `Bearer ${igdbToken}`,
+                    },
+                    body: `search "${query}"; fields name,cover.url,first_release_date,rating; limit 10;`,
+                })
+                const data = await response.json()
+                console.log("[MediaTracker] IGDB Games response:", data)
+
+                if (Array.isArray(data)) {
+                    results = data.map((item: any) => ({
+                        id: `game-${item.id}`,
+                        title: item.name || "Unknown Title",
+                        image: item.cover?.url
+                            ? `https:${item.cover.url.replace("t_thumb", "t_cover_big")}`
+                            : "https://via.placeholder.com/200x300?text=No+Image",
+                        year: item.first_release_date
+                            ? new Date(item.first_release_date * 1000)
+                                  .getFullYear()
+                                  .toString()
+                            : "",
+                        rating: item.rating
+                            ? Math.round(item.rating) / 10
+                            : undefined,
+                        type: "games" as TabType,
+                    }))
+                }
+            } else if (activeTab === "books") {
+                // Google Books API - No API key needed
+                const response = await fetch(
+                    `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(query)}&maxResults=10`
+                )
+                const data = await response.json()
+                console.log("[MediaTracker] Google Books response:", data)
+
+                if (data.items && Array.isArray(data.items)) {
+                    results = data.items.map((item: any) => ({
+                        id: `book-${item.id}`,
+                        title: item.volumeInfo?.title || "Unknown Title",
+                        image:
+                            item.volumeInfo?.imageLinks?.thumbnail ||
+                            item.volumeInfo?.imageLinks?.smallThumbnail ||
+                            "https://via.placeholder.com/200x300?text=No+Image",
+                        year:
+                            item.volumeInfo?.publishedDate?.split("-")[0] || "",
+                        rating: item.volumeInfo?.averageRating
+                            ? Math.round(item.volumeInfo.averageRating * 10) /
+                              10
+                            : undefined,
+                        type: "books" as TabType,
+                    }))
+                }
+            }
+
+            console.log(
+                `[MediaTracker] Found ${results.length} results for "${query}" in ${activeTab}`
+            )
+
+            startTransition(() => {
+                setSearchResults(results)
+                setIsSearching(false)
+            })
+        } catch (error) {
+            console.error("[MediaTracker] Search error", error)
+            startTransition(() => {
+                setSearchResults([])
+                setIsSearching(false)
+            })
+        }
+    }, [query, activeTab, igdbToken])
+
+    const handleAddItem = useCallback((item: MediaItem) => {
+        startTransition(() => {
+            setTrackedItems((prev) => {
+                const existing = prev[item.type].find((i) => i.id === item.id)
+                if (existing) return prev
+
+                const newItem = {
+                    ...item,
+                    hoursSpent: Math.floor(Math.random() * 50) + 1,
+                    dateAdded: new Date().toISOString(),
+                }
+
+                return {
+                    ...prev,
+                    [item.type]: [...prev[item.type], newItem],
+                }
+            })
+            setSearchResults([])
+            setQuery("")
+        })
+    }, [])
+
+    const handleRemoveItem = useCallback((itemId: string, type: TabType) => {
+        startTransition(() => {
+            setTrackedItems((prev) => ({
+                ...prev,
+                [type]: prev[type].filter((i) => i.id !== itemId),
+            }))
+        })
+    }, [])
+
+    const handleToggleTheme = useCallback(() => {
+        startTransition(() => {
+            setIsDarkMode((prev) => !prev)
+        })
+    }, [])
+
+    const handleTabChange = useCallback((tab: TabType) => {
+        startTransition(() => {
+            setActiveTab(tab)
+            setQuery("")
+            setSearchResults([])
+        })
+    }, [])
+
+    const currentTrackedItems = trackedItems[activeTab] || []
+
+    // Calculate statistics
+    const stats = useMemo(() => {
+        const totalItems = Object.values(trackedItems).reduce(
+            (sum, items) => sum + items.length,
+            0
+        )
+        const totalHours = Object.values(trackedItems).reduce(
+            (sum, items) =>
+                sum + items.reduce((s, item) => s + (item.hoursSpent || 0), 0),
+            0
+        )
+
+        const byType = {
+            films: {
+                count: trackedItems.films.length,
+                hours: trackedItems.films.reduce(
+                    (s, item) => s + (item.hoursSpent || 0),
+                    0
+                ),
+            },
+            series: {
+                count: trackedItems.series.length,
+                hours: trackedItems.series.reduce(
+                    (s, item) => s + (item.hoursSpent || 0),
+                    0
+                ),
+            },
+            anime: {
+                count: trackedItems.anime.length,
+                hours: trackedItems.anime.reduce(
+                    (s, item) => s + (item.hoursSpent || 0),
+                    0
+                ),
+            },
+            games: {
+                count: trackedItems.games.length,
+                hours: trackedItems.games.reduce(
+                    (s, item) => s + (item.hoursSpent || 0),
+                    0
+                ),
+            },
+            books: {
+                count: trackedItems.books.length,
+                hours: trackedItems.books.reduce(
+                    (s, item) => s + (item.hoursSpent || 0),
+                    0
+                ),
+            },
+        }
+
+        return { totalItems, totalHours, byType }
+    }, [trackedItems])
+
+    return (
+        <div
+            style={{
+                ...containerStyle,
+                backgroundColor: colors.backgroundColor,
+                color: colors.textColor,
+                ...style,
+            }}
+        >
+            <link
+                href="https://fonts.googleapis.com/css2?family=Inconsolata:wght@400;700&display=swap"
+                rel="stylesheet"
+            />
+            <style>
+                {`
+                    @media (max-width: 768px) {
+                        .media-tracker-root {
+                            padding: 16px !important;
+                            margin-bottom: 64px !important;
+                        }
+                        .media-results-grid {
+                            display: grid !important;
+                            grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+                        }
+                    }
+                `}
+            </style>
+
+            {/* Fixed Header */}
+            <div
+                style={{
+                    position: "fixed",
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    height: "60px",
+                    backgroundColor: colors.backgroundColor,
+                    borderBottom: `1px solid ${colors.tableBorderColor}`,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    padding: "0 40px",
+                    zIndex: 1000,
+                }}
+            >
+                <div
+                    style={{
+                        width: "100%",
+                        maxWidth: 960,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                    }}
+                >
+                    <h2
+                        style={{
+                            margin: 0,
+                            color: colors.textColor,
+                            fontFamily: "Inconsolata, monospace",
+                            fontSize: "24px",
+                            fontWeight: 700,
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 8,
+                        }}
+                    >
+                        {logo?.src && (
+                            <img
+                                src={logo.src}
+                                alt="Site logo"
+                                style={{
+                                    width: 24,
+                                    height: 24,
+                                    objectFit: "contain",
+                                }}
+                            />
+                        )}
+                        {title}
+                    </h2>
+                    <div style={{ display: "flex", gap: 8 }}>
+                        <button
+                            type="button"
+                            onClick={handleToggleTheme}
+                            disabled={isStatic}
+                            style={{
+                                fontFamily: "Inconsolata, monospace",
+                                fontSize: "14px",
+                                padding: "6px 10px",
+                                borderRadius: 8,
+                                border: `1px solid ${colors.tableBorderColor}`,
+                                backgroundColor: colors.cardColor,
+                                color: colors.textColor,
+                                cursor: isStatic ? "default" : "pointer",
+                                opacity: isStatic ? 0.5 : 1,
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                gap: 4,
+                                width: "100px",
+                            }}
+                        >
+                            {isDarkMode ? (
+                                <>
+                                    {themeDarkIcon?.src ? (
+                                        <img
+                                            src={themeDarkIcon.src}
+                                            style={{
+                                                width: 16,
+                                                height: 16,
+                                                display: "block",
+                                                objectFit: "contain",
+                                            }}
+                                            alt="Dark mode icon"
+                                        />
+                                    ) : (
+                                        <svg
+                                            xmlns="http://www.w3.org/2000/svg"
+                                            width="16"
+                                            height="16"
+                                            viewBox="0 0 24 24"
+                                            fill="none"
+                                            stroke="currentColor"
+                                            strokeWidth="1.5"
+                                        >
+                                            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+                                        </svg>
+                                    )}
+                                    Dark
+                                </>
+                            ) : (
+                                <>
+                                    {themeLightIcon?.src ? (
+                                        <img
+                                            src={themeLightIcon.src}
+                                            style={{
+                                                width: 16,
+                                                height: 16,
+                                                display: "block",
+                                                objectFit: "contain",
+                                            }}
+                                            alt="Light mode icon"
+                                        />
+                                    ) : (
+                                        <svg
+                                            xmlns="http://www.w3.org/2000/svg"
+                                            width="16"
+                                            height="16"
+                                            viewBox="0 0 24 24"
+                                            fill="none"
+                                        >
+                                            <path
+                                                d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"
+                                                stroke="currentColor"
+                                                strokeWidth="1.5"
+                                            />
+                                        </svg>
+                                    )}
+                                    Light
+                                </>
+                            )}
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div style={innerStyle}>
+                <>
+                    {/* Header */}
+                    <header style={{ marginBottom: 32, marginTop: 60 }}>
+                        <p
+                            style={{
+                                margin: 0,
+                                marginBottom: 32,
+                                color: colors.textColor,
+                                fontFamily: "Inconsolata, monospace",
+                                fontSize: "32px",
+                                fontWeight: 700,
+                                textAlign: "center",
+                                letterSpacing: "-0.03em",
+                                lineHeight: "1.3em",
+                            }}
+                        >
+                            {subtitle}
+                        </p>
+
+                        {/* Tabs */}
+                        <div
+                            style={{
+                                display: "flex",
+                                gap: 8,
+                                marginBottom: 24,
+                                justifyContent: "center",
+                                flexWrap: "wrap",
+                            }}
+                        >
+                            {(
+                                [
+                                    "films",
+                                    "series",
+                                    "anime",
+                                    "games",
+                                    "books",
+                                ] as TabType[]
+                            ).map((tab) => (
+                                <button
+                                    key={tab}
+                                    type="button"
+                                    onClick={() => handleTabChange(tab)}
+                                    style={{
+                                        fontFamily: "Inconsolata, monospace",
+                                        fontSize: "16px",
+                                        padding: "10px 20px",
+                                        borderRadius: 8,
+                                        border: `1px solid ${colors.tableBorderColor}`,
+                                        backgroundColor:
+                                            activeTab === tab
+                                                ? colors.accentColor
+                                                : colors.cardColor,
+                                        color:
+                                            activeTab === tab
+                                                ? isDarkMode
+                                                    ? "#0A0A0A"
+                                                    : "#FFFFFF"
+                                                : colors.textColor,
+                                        cursor: "pointer",
+                                        fontWeight:
+                                            activeTab === tab ? 700 : 400,
+                                    }}
+                                >
+                                    {tab.charAt(0).toUpperCase() + tab.slice(1)}
+                                </button>
+                            ))}
+                        </div>
+
+                        {/* Search */}
+                        <div
+                            style={{
+                                display: "flex",
+                                gap: 12,
+                                maxWidth: 380,
+                                margin: "0 auto",
+                            }}
+                        >
+                            <div
+                                style={{
+                                    flex: 1,
+                                    display: "flex",
+                                    alignItems: "center",
+                                    padding: "0px 12px",
+                                    borderRadius: 8,
+                                    backgroundColor: colors.cardColor,
+                                    border: `1px solid ${colors.tableBorderColor}`,
+                                    height: "48px",
+                                }}
+                            >
+                                {searchIcon?.src ? (
+                                    <img
+                                        src={searchIcon.src}
+                                        style={{
+                                            width: 16,
+                                            height: 16,
+                                            marginRight: 8,
+                                            filter: isDarkMode
+                                                ? "none"
+                                                : "invert(1)",
+                                        }}
+                                        alt="Search"
+                                    />
+                                ) : (
+                                    <svg
+                                        xmlns="http://www.w3.org/2000/svg"
+                                        width="16"
+                                        height="16"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        strokeWidth="2"
+                                        style={{ marginRight: 8 }}
+                                    >
+                                        <circle cx="11" cy="11" r="8" />
+                                        <line
+                                            x1="21"
+                                            y1="21"
+                                            x2="16.65"
+                                            y2="16.65"
+                                        />
+                                    </svg>
+                                )}
+                                <input
+                                    type="text"
+                                    placeholder={searchPlaceholder}
+                                    value={query}
+                                    onChange={(e) => setQuery(e.target.value)}
+                                    onKeyDown={(e) =>
+                                        e.key === "Enter" && handleSearch()
+                                    }
+                                    style={{
+                                        flex: 1,
+                                        border: "none",
+                                        backgroundColor: "transparent",
+                                        color: colors.textColor,
+                                        outline: "none",
+                                        fontSize: 16,
+                                        fontFamily: "Inconsolata, monospace",
+                                    }}
+                                />
+                            </div>
+                            <button
+                                type="button"
+                                onClick={handleSearch}
+                                disabled={!query.trim()}
+                                style={{
+                                    fontFamily: "Inconsolata, monospace",
+                                    fontSize: "14px",
+                                    padding: "10px 20px",
+                                    borderRadius: 8,
+                                    border: "none",
+                                    backgroundColor: colors.accentColor,
+                                    color: isDarkMode ? "#0A0A0A" : "#FFFFFF",
+                                    cursor: !query.trim()
+                                        ? "default"
+                                        : "pointer",
+                                    opacity: !query.trim() ? 0.5 : 1,
+                                }}
+                            >
+                                {isSearching ? "Searching..." : "Search"}
+                            </button>
+                        </div>
+                    </header>
+
+                    {/* Search Results */}
+                    {searchResults.length > 0 && (
+                        <section style={{ marginBottom: 32 }}>
+                            <h3
+                                style={{
+                                    margin: "0 0 16px 0",
+                                    color: colors.textColor,
+                                    fontFamily: "Inconsolata, monospace",
+                                    fontSize: 18,
+                                    fontWeight: 700,
+                                }}
+                            >
+                                Search Results
+                            </h3>
+                            <div
+                                className="media-results-grid"
+                                style={{
+                                    display: "grid",
+                                    gridTemplateColumns:
+                                        "repeat(auto-fill, minmax(150px, 1fr))",
+                                    gap: 16,
+                                }}
+                            >
+                                {searchResults.map((item) => (
+                                    <div
+                                        key={item.id}
+                                        style={{
+                                            backgroundColor: colors.cardColor,
+                                            border: `1px solid ${colors.tableBorderColor}`,
+                                            borderRadius: 8,
+                                            padding: 12,
+                                            cursor: "pointer",
+                                        }}
+                                        onClick={() => handleAddItem(item)}
+                                    >
+                                        <img
+                                            src={item.image}
+                                            alt={item.title}
+                                            style={{
+                                                width: "100%",
+                                                height: "200px",
+                                                objectFit: "cover",
+                                                borderRadius: 4,
+                                                marginBottom: 8,
+                                            }}
+                                        />
+                                        <div
+                                            style={{
+                                                fontFamily:
+                                                    "Inconsolata, monospace",
+                                                fontSize: 14,
+                                                color: colors.textColor,
+                                                fontWeight: 600,
+                                                marginBottom: 4,
+                                                overflow: "hidden",
+                                                textOverflow: "ellipsis",
+                                                whiteSpace: "nowrap",
+                                            }}
+                                        >
+                                            {item.title}
+                                        </div>
+                                        <div
+                                            style={{
+                                                fontFamily:
+                                                    "Inconsolata, monospace",
+                                                fontSize: 12,
+                                                color: colors.mutedTextColor,
+                                            }}
+                                        >
+                                            {item.year}{" "}
+                                            {item.rating
+                                                ? `• ${item.rating}/10`
+                                                : ""}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </section>
+                    )}
+
+                    {/* Tracked Items */}
+                    <section>
+                        <h3
+                            style={{
+                                margin: "0 0 16px 0",
+                                color: colors.textColor,
+                                fontFamily: "Inconsolata, monospace",
+                                fontSize: 18,
+                                fontWeight: 700,
+                            }}
+                        >
+                            Tracked{" "}
+                            {activeTab.charAt(0).toUpperCase() +
+                                activeTab.slice(1)}{" "}
+                            ({currentTrackedItems.length})
+                        </h3>
+                        {currentTrackedItems.length === 0 ? (
+                            <div
+                                style={{
+                                    padding: 40,
+                                    textAlign: "center",
+                                    color: colors.mutedTextColor,
+                                    fontFamily: "Inconsolata, monospace",
+                                    backgroundColor: colors.cardColor,
+                                    border: `1px solid ${colors.tableBorderColor}`,
+                                    borderRadius: 8,
+                                }}
+                            >
+                                No tracked items yet. Search and add some!
+                            </div>
+                        ) : (
+                            <div
+                                className="media-results-grid"
+                                style={{
+                                    display: "grid",
+                                    gridTemplateColumns:
+                                        "repeat(auto-fill, minmax(150px, 1fr))",
+                                    gap: 16,
+                                }}
+                            >
+                                {currentTrackedItems.map((item) => (
+                                    <div
+                                        key={item.id}
+                                        style={{
+                                            backgroundColor: colors.cardColor,
+                                            border: `1px solid ${colors.tableBorderColor}`,
+                                            borderRadius: 8,
+                                            padding: 12,
+                                            position: "relative",
+                                        }}
+                                    >
+                                        <button
+                                            type="button"
+                                            onClick={() =>
+                                                handleRemoveItem(
+                                                    item.id,
+                                                    item.type
+                                                )
+                                            }
+                                            style={{
+                                                position: "absolute",
+                                                top: 8,
+                                                right: 8,
+                                                width: 24,
+                                                height: 24,
+                                                borderRadius: 4,
+                                                border: "none",
+                                                backgroundColor:
+                                                    "rgba(0,0,0,0.7)",
+                                                color: "#fff",
+                                                cursor: "pointer",
+                                                fontSize: 16,
+                                                display: "flex",
+                                                alignItems: "center",
+                                                justifyContent: "center",
+                                            }}
+                                        >
+                                            ×
+                                        </button>
+                                        <img
+                                            src={item.image}
+                                            alt={item.title}
+                                            style={{
+                                                width: "100%",
+                                                height: "200px",
+                                                objectFit: "cover",
+                                                borderRadius: 4,
+                                                marginBottom: 8,
+                                            }}
+                                        />
+                                        <div
+                                            style={{
+                                                fontFamily:
+                                                    "Inconsolata, monospace",
+                                                fontSize: 14,
+                                                color: colors.textColor,
+                                                fontWeight: 600,
+                                                marginBottom: 4,
+                                                overflow: "hidden",
+                                                textOverflow: "ellipsis",
+                                                whiteSpace: "nowrap",
+                                            }}
+                                        >
+                                            {item.title}
+                                        </div>
+                                        <div
+                                            style={{
+                                                fontFamily:
+                                                    "Inconsolata, monospace",
+                                                fontSize: 12,
+                                                color: colors.mutedTextColor,
+                                            }}
+                                        >
+                                            {item.year}{" "}
+                                            {item.rating
+                                                ? `• ${item.rating}/10`
+                                                : ""}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </section>
+                </>
+            </div>
+        </div>
+    )
+}
+
+const containerStyle: CSSProperties = {
+    position: "relative",
+    width: "100%",
+    height: "100%",
+    fontFamily: "Inconsolata, monospace",
+    display: "flex",
+    justifyContent: "center",
+    alignItems: "flex-start",
+    boxSizing: "border-box",
+    padding: 40,
+    overflowY: "auto",
+}
+
+const innerStyle: CSSProperties = {
+    width: "100%",
+    maxWidth: 960,
+    margin: "0 auto",
+}
+
+addPropertyControls(MediaTracker, {
+    title: {
+        type: ControlType.String,
+        title: "Title",
+        defaultValue: "Media Tracker",
+    },
+    subtitle: {
+        type: ControlType.String,
+        title: "Subtitle",
+        defaultValue: "Track your favorite films, series, anime & games",
+    },
+    searchPlaceholder: {
+        type: ControlType.String,
+        title: "Search Placeholder",
+        defaultValue: "Search...",
+    },
+    backgroundColor: {
+        type: ControlType.Color,
+        title: "Background",
+        defaultValue: "#141414",
+    },
+    cardColor: {
+        type: ControlType.Color,
+        title: "Card",
+        defaultValue: "#1A1A1A",
+    },
+    textColor: {
+        type: ControlType.Color,
+        title: "Text",
+        defaultValue: "#FFFFFF",
+    },
+    mutedTextColor: {
+        type: ControlType.Color,
+        title: "Muted Text",
+        defaultValue: "#888888",
+    },
+    accentColor: {
+        type: ControlType.Color,
+        title: "Accent",
+        defaultValue: "#FFFFFF",
+    },
+    tableBorderColor: {
+        type: ControlType.Color,
+        title: "Border",
+        defaultValue: "#2A2A2A",
+    },
+    themeDarkIcon: {
+        type: ControlType.ResponsiveImage,
+        title: "Dark Mode Icon",
+    },
+    themeLightIcon: {
+        type: ControlType.ResponsiveImage,
+        title: "Light Mode Icon",
+    },
+    searchIcon: {
+        type: ControlType.ResponsiveImage,
+        title: "Search Icon",
+    },
+    logo: {
+        type: ControlType.ResponsiveImage,
+        title: "Logo (PNG)",
+    },
+})
